@@ -2,3 +2,5 @@
 *_cache
 bibliography.bibtex
 *.RData
+train.csv
+test.csv
