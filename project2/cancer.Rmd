@@ -1,0 +1,206 @@
+---
+author: "Jakub Bednarz"
+title: "<center>Project #2</center>"
+output: html_notebook
+bibliography: "bibliography.bibtex"
+---
+
+First, the libraries:
+``` {r}
+library(ggplot2)
+library(ggridges)
+library(glmnet)
+library(mlr3verse)
+library(mlr3fselect)
+lgr::get_logger("mlr3")$set_threshold("warn")
+
+set.seed(9000)
+```
+
+We are going to operate on a table from `cancer.RData`:
+``` {r}
+df = load("cancer.RData")
+data.train = as.data.frame(data.train)
+data.test = as.data.frame(data.test)
+
+y = data.train[,"Y"]
+X = data.train[,-grep("Y", colnames(data.train))]
+X = as.matrix(X)
+```
+
+## Part 1
+We are to, in general, analyze the features in the dataset.
+
+``` {r}
+table(apply(X, 2, class))
+sum(is.na(X))
+```
+
+As expected, all the features are numerical; also, all the features are non-N/A so we need not imput any values. Next, we select 500 features by largest variance and plot the distribution of their covariances. I assume we are to plot the distribution of all their covariances at once and not 500 violin plots for each feature since that would be silly.
+
+``` {r}
+variances = apply(X, 1, var)
+nfeatures = 500
+features = colnames(X)[order(variances, decreasing = TRUE)[1:500]]
+feat_columns = X[,features]
+
+covariances = cor(feat_columns, feat_columns)
+cov_df = data.frame(as.vector(covariances))
+colnames(cov_df) <- c("Covariances")
+
+ggplot() +
+  geom_violin(data = cov_df, aes(x = "Covariances", y = Covariances))
+```
+
+I must admit I have no idea how to interpret this plot.
+
+## Part 2
+Elastic nets are, essentially, supposed to overcome certain limitations of ridge ($L^2$) and lasso ($L^1$) regularization methods. The first one usually works best when $y$ depends on many features with similar coefficients; the second one is better when $y$ depends on a small number of features. Of course, in many cases neither of these is really the case, and in any case we don't know *a priori* which one to pick. The idea is then to combine these two regularization methods *into a single one*, as in $\|y - Ax \|^2 + \lambda(\alpha \| x \|_1 + (1-\alpha) \| x \|_2^2)$; $\alpha = 0$ recovers ridge, and $\alpha = 1$ recovers lasso. This, however, comes at a cost: though $\lambda$ can be fitted automatically, $\alpha$ must be "guessed"; thankfully *usually* we can pick sparsely from the ridge end of the spectrum (say $0.25$, $0.5$, $0.75$) and more densely from the lasso end ($0.8$, $0.9$, $0.99$ etc.) and the sparsity at the ridge end doesn't affect the results that much. Thus the elastic nets are flexible and efficient replacements for standard $L^1$ or $L^2$-regularized linear models.
+
+## Parts 3-4
+I will use `mlr3` package, chiefly because I haven't used it before and it's supposedly good. 
+``` {r}
+task = as_task_regr(data.train, target = "Y")
+measure = msr("regr.mse")
+cv = rsmp("cv", folds = 5)
+```
+
+### Feature selection
+First, we want to perform feature selection, as we may conjecture that of the 18k features most are utterly useless. Not only will the training process be quicker, potentially the scores will be better even though information is lost, since for example RFs will be able to "focus better on relevant variables". There are many ways of approaching this ([@10.1093/bib/bbx124, @genuer2010variable]), but because we don't necessarily need sophistication and I don't have the necessary compute. As for the more simple approaches, elastic net automatically selects features due to $L^1$ regularization, and RFs compute variable importance. One could also check the variance of the variables, somewhat in the vein of performing dimensionality reduction via PCA. I want to investigate the variable importance, especially whether it's "stable" across different runs and different CV folds. We will perform a $10$-fold CV and plot normalized VI means and medians.
+
+``` {r}
+vi_cv = rsmp("cv", folds = 10)
+vi_rf = lrn("regr.ranger", importance = "impurity")
+vi_res = resample(task, vi_rf, vi_cv, store_models = TRUE)
+```
+
+``` {r}
+normed_vi = sapply(vi_res$learners, function(m) {
+  vi = as.data.frame(m$importance())
+  ord = order(rownames(vi))
+  return((vi/sum(vi))[ord,])
+})
+
+nvi_mean = apply(normed_vi, 1, mean)
+nvi_quant = apply(normed_vi, 1, quantile)
+nvi_med = nvi_quant[3,]
+
+nvi_mean_ord = order(nvi_mean, decreasing = TRUE)
+nvi_mean = nvi_mean[nvi_mean_ord]
+nvi_med = nvi_med[nvi_mean_ord]
+
+n = length(nvi_mean)
+
+ggplot() +
+  geom_line(aes(x = 1:n, y = nvi_mean)) + 
+  geom_line(aes(x = 1:n, y = nvi_med), alpha = 0.5)
+```
+
+These results are a *bit* concerning, since they imply that VI mean is not necessarily *the* measure to assess the variables by, since the medians are quite different from them. Let's see whether different quantiles are as mutually-fluctuating:
+``` {r}
+nvi_quant2 = apply(normed_vi, 1, quantile)
+nvi_quant2_ord = order(nvi_quant2[3,], decreasing = TRUE)
+nvi_quant2 = nvi_quant2[,nvi_quant2_ord]
+
+ggplot() +
+  geom_line(aes(x = 1:n, y = nvi_quant2[1,]), alpha = 0.5) + 
+  geom_line(aes(x = 1:n, y = nvi_quant2[2,]), alpha = 0.5) +
+  geom_line(aes(x = 1:n, y = nvi_quant2[3,])) +
+  geom_line(aes(x = 1:n, y = nvi_quant2[4,]), alpha = 0.5) +
+  geom_line(aes(x = 1:n, y = nvi_quant2[5,]), alpha = 0.5)
+```
+
+They are still fluctuating; let's perhaps now look at what the lasso models think should be the optimal value of non-zero terms:
+``` {r}
+lasso_res = cv.glmnet(X, y, alpha = 1)
+quantile(lasso_res$nzero)
+```
+
+The median is $<200$. For one, I didn't think that there would be so much variability, perhaps the other terms are completely useless and the mean values they attain are essentially due to outliers. Taking a further look at the graph with VI means and medians, around $k = 500$ the median starts to "lift off" from 0; having all this and the performance considerations in mind, although the decision is far more "heurestic" than I'd wish, I think it's safe to run an RF and pick, say, top 500 features based on VI.
+
+``` {r}
+rf_filt_learner = lrn("regr.ranger", importance = "impurity")
+rf_filt = flt("importance", learner = rf_filt_learner)
+rf_filt$calculate(task)
+selected = as.data.frame(as.data.table(rf_filt))[1:500, "feature"]
+reduced_task = task$clone()$select(selected)
+```
+
+As for the models themselves, we will "simply" run a random grid search with some suitable hyperparameter distributions with $5$-fold CV and run it into stagnation.
+
+### Elastic net model
+
+``` {r}
+enet_learner = lrn("regr.glmnet")
+enet_hypers = ps(
+  alpha = p_dbl(1e-5, 0.8),
+  nlambda = p_int(lower = 1, upper = 256)
+)
+enet_term = trm("stagnation")
+
+enet_inst = TuningInstanceSingleCrit$new(
+  task = reduced_task,
+  learner = enet_learner,
+  resampling = cv,
+  measure = measure,
+  search_space = enet_hypers,
+  terminator = enet_term
+)
+
+enet_tuner = tnr("random_search")
+enet_tuner$optimize(enet_inst)
+enet_learner$param_set$values = enet_inst$result_learner_param_vals
+```
+
+I must note that, looking at the printouts, having selected the features made more lasso-like elastic nets not perform as well as they used to, i.e. now it doesn't make sense to cut out features because we already did it once.
+
+
+### Random forest
+``` {r}
+rf_learner = lrn("regr.ranger", importance = "impurity")
+rf_hypers = ps(
+  num.trees = p_int(lower = 100, upper = 2048)
+)
+rf_term = trm("stagnation")
+
+rf_inst = TuningInstanceSingleCrit$new(
+  task = reduced_task,
+  learner = rf_learner,
+  resampling = cv,
+  measure = measure,
+  search_space = rf_hypers,
+  terminator = rf_term
+)
+
+rf_tuner = tnr("random_search")
+rf_tuner$optimize(rf_inst)
+rf_learner$param_set$values = rf_inst$result_learner_param_vals
+```
+
+### Summary
+Let's run the models (now with best parameters) again:
+``` {r}
+resamp_enet = resample(reduced_task, enet_learner, cv)
+res_enet = resamp_enet$score(measure)[,"regr.mse"]
+
+resamp_rf = resample(reduced_task, rf_learner, cv)
+res_rf = resamp_rf$score(measure)[,"regr.mse"]
+
+res_df = data.frame(res_enet, res_rf)
+colnames(res_df) = c("Elastic net", "Random forest")
+res_df
+
+apply(res_df, 2, mean)
+apply(res_df, 2, sd)
+```
+
+To be frank, (1) there's not that great a difference between them, (2) they seem to "swap positions" as I rerun it; I will pick the elastic net because they will output the predictions faster.
+
+## Part 5
+Now all that is left to be done is saving the results.
+``` {r}
+enet_learner$train(reduced_task)
+reduced_test = data.test[,selected]
+predictions = enet_learner$predict_newdata(reduced_test)$response
+save(predictions, file = "jb406103.RData")
+```

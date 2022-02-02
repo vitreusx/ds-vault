@@ -1,0 +1,342 @@
+---
+author: "Author: <i>Jakub Bednarz</i>"
+title: "<center>Extra tasks from Lab 12</center>"
+output: html_notebook
+---
+
+Let's load the requisite libraries first and fix the RNG.
+
+``` {r}
+library(rpart)
+library(ggplot2)
+library(randomForest)
+library(caret)
+library(ISLR)
+library(gbm)
+library(MASS)
+library(rpart.plot)
+library(ROCR)
+library(dplyr)
+library(plotly)
+
+set.seed(2137)
+ggplot2::theme_set(ggplot2::theme_minimal())
+
+knitr::opts_chunk$set(
+  warning = FALSE, 
+  message = FALSE
+)
+
+options(browser = 'chromium')
+```
+
+## Task 2
+The task is to, essentially, modify label assignment procedure from simple "whichever is higher" to "whichever _weighted_ is higher", which should help for datasets where class labels are imbalanced (such as this one). That's all in theory, anyways - in practice, this task is basically drawing ROCs.
+
+First, we shall load the data and create the requisite "base" model.
+``` {r}
+biopsy$ID <- NULL
+biopsy <- na.omit(biopsy)
+
+train_frac = 0.8
+train_size = floor(train_frac * nrow(biopsy))
+train_idx = sample(seq_len(nrow(biopsy)), size = train_size)
+train = biopsy[train_idx,]
+test = biopsy[-train_idx,]
+
+tree = rpart(class ~ ., data = train, method = 'class')
+rpart.plot(tree, main = "Cancer malignancy classification")
+```
+
+To evaluate the model "visually", we will use ROC. For example:
+``` {r}
+ROC_line = function(probs, labels) {
+  mal_prob = probs[,2]
+  mal_labels = as.integer(labels == "malignant")
+  
+  pred <- prediction(mal_prob, mal_labels)
+  perf <- performance(pred, measure = "tpr", x.measure = "fpr")
+  FPR = nth(perf@x.values, 1)
+  TPR = nth(perf@y.values, 1)
+
+  return(geom_line(aes(x=FPR, y=TPR), color='orange'))
+}
+
+probs = predict(tree, newdata = test)
+ggplot() +
+  geom_abline(slope=1, intercept=0, alpha=0.2) +
+  ROC_line(probs, test$class)
+```
+
+We are to check how many malignant tumors are classified as being benign when at most 10% of benign tumors can be classified as being malignant. Glancing at the plot yields $\approx 5\%$, though perhaps a more accurate method than "glancing" would be better; I won't pursue it, though.
+
+There is another objective for the "ambitious", namely to do a $k$-fold CV and plot ROCs for each one of them.
+``` {r}
+k = 5
+folds_indices = sample(cut(1:nrow(biopsy), k, labels = F))
+
+fold_ROC = function(fold_idx) {
+  test_indices = which(folds_indices == fold_idx)
+  fold_train = biopsy[-test_indices,]
+  fold_test = biopsy[test_indices,]
+
+  model = rpart(class ~ ., data = fold_train, method = "class")
+  probs = predict(model, newdata = fold_test)
+
+  return(ROC_line(probs, fold_test$class))
+}
+
+ggplot() +
+  geom_abline(slope=1, intercept=0, alpha=0.2) +
+  sapply(1:k, fold_ROC)
+```
+
+Aside from fighting with R and `ggplot2`, I wouldn't say it was all that difficult.
+
+## Task 3
+In this task, we are to model `biopsy` dataset with random forests. In particular, we need to: (1) create the model, (2) plot feature importance levels, (3) (optionally?) tweak hyperparameters, (4) perform manual cross-validation.
+
+First, model and hyperparameters (with $5$-fold CV):
+``` {r}
+rf_cv_err = function(mtry, ntree) {
+  k = 5
+  folds_indices = sample(cut(1:nrow(biopsy), k, labels = F))
+
+  fold_error = function(fold_idx) {
+    test_indices = which(folds_indices == fold_idx)
+    fold_train = biopsy[-test_indices,]
+    fold_test = biopsy[test_indices,]
+
+    model = randomForest(
+      class ~ ., data = fold_train, importance = TRUE,
+      mtry = mtry, ntree = ntree)
+    preds = predict(model, fold_test)
+
+    err = sum(preds != fold_test$class) / nrow(fold_test)
+    return(err)
+  }
+
+  return(mean(sapply(1:k, fold_error)))
+}
+```
+
+Feature importance plots (I had to modify the original code in order for the bars' height to be ordered; it was surprisingly difficult to achieve).
+``` {r}
+plot_feat_imp = function(rf) {
+  imp = rf$importance
+  last = ncol(imp)
+  ord = order(imp[,last], decreasing = TRUE)
+  df = data.frame(
+    "Importance" = as.numeric(imp[,last]),
+    "Feature" = rownames(imp))
+
+  plot = ggplot(df) +
+    geom_col(aes(x = reorder(Feature, -imp[,last]),
+                 y = Importance)) +
+    ggtitle("Feature importance levels for RF")
+  return(plot)
+}
+```
+
+First we shall plot the feature importance levels for the "default model", i.e.
+non-CV model with default `mtry` and `trees` parameters:
+``` {r}
+def_model = randomForest(class ~ ., data = biopsy, importance = TRUE)
+plot_feat_imp(def_model)
+```
+
+Next, we will try to optimize `trees` and `fit` (separately).
+``` {r, cache = TRUE}
+def_mtry = floor(sqrt(ncol(biopsy)))
+def_ntree = 500
+
+mtry_dist = 3:8
+mtry_fit_errs = sapply(mtry_dist, function(mtry)
+  rf_cv_err(mtry, def_ntree))
+
+ggplot(data.frame("Mtry" = mtry_dist, "Error" = mtry_fit_errs)) +
+  geom_line(aes(x = Mtry, y = Error))
+
+geom_seq = function(from, to, n) {
+  return(exp(seq(log(from), log(to), length.out=n)))
+}
+
+ntree_dist = round(geom_seq(50, 1000, 10))
+ntree_fit_errs = sapply(ntree_dist, function(ntree)
+  rf_cv_err(def_mtry, ntree))
+
+ggplot(data.frame("Ntree" = ntree_dist, "Error" = ntree_fit_errs)) +
+  geom_line(aes(x = Ntree, y = Error))
+```
+
+Although somewhat chaotic in the beginning, a minimum is reached around 500 and from there on error increases. One must note, however, that it's not "catastrophic" (or at least it's not in my estimation).
+
+As for the comparison between CV error and OOB error:
+``` {r}
+def_model
+cat("CV error: ", rf_cv_err(def_mtry, def_ntree), "\n")
+```
+
+So we get an error estimate of $2.93\%$ for OOB and $2.49\%$ for $5$-fold CV.
+
+## Task 4
+This seems like more of an analytically solvable task. Let us denote by $V$ the number of violet observations, and by $G$ the number of the green ones. For $J$ classes (here $J = 2$), and probabilities $p_i$ of a random item in the set being in $i$-th class, Gini impurity is $I_G = 1 - \sum p_i^2$ ([From Wiki](https://en.wikipedia.org/wiki/Decision_tree_learning#Gini_impurity)). As $p_V = V/(V+G), p_G = G/(V+G)$, we get:
+``` {r}
+gini = function(v, g) {
+  p_v = v / (v + g)
+  p_g = g / (v + g)
+  return(1-p_v*p_v-p_g*p_g)
+}
+```
+
+In the first order, we must plot Gini impurity for a set of $V$ violets and $10-V$ greens:
+``` {r}
+v = 0:10
+ggplot() +
+  geom_line(aes(x = v, gini(v, 10-v))) +
+  labs(x = "# of violets", y = "Gini impurity")
+```
+
+We are now to extend this to arbitrary assignment of violent and green observations in the form of a 3d plot:
+``` {r}
+v = 0:20
+x = outer(v, v, function(x, y) x)
+y = outer(v, v, function(x, y) y)
+z = outer(v, v, gini)
+z[is.na(z)] = 0
+
+plot_ly(x = x, y = y, z = z, type = "mesh3d") %>%
+  add_surface()
+```
+
+I'm not sure how to comment on it, to be quite honest.
+
+## Task 5
+In this task we train boosting classifiers on `Khan` dataset. `distribution = "multinomial"` is apparently broken, and we are forced to use `gbm` package. I resolved therefore to "normal" regression model and round the result to closest integer. This is, of course, mathematically wrong, but otherwise I'd have to (presumably) train 4 models (Bernoulli for each class) which would be less than ideal.
+
+``` {r}
+train_df = data.frame(Khan$xtrain, "y" = as.factor(Khan$ytrain))
+test_df = data.frame(Khan$xtest)
+
+gbm_err = function(n.trees, shrinkage) {
+  model = gbm(y ~ ., data = train_df,
+    n.trees = n.trees, shrinkage = shrinkage,
+    distribution = "gaussian", cv.folds = 5)
+  pred = round(predict(model, newdata=test_df))
+  return(sum(pred == Khan$ytest)/length(pred))
+}
+```
+
+Before we get to the hyperfitting, I must note that, given the fact `Khan$ytest` has 20 elements, and we don't use a mathematically correct method, it's somewhat hard to judge which model is better and which is worse; regardless:
+``` {r, cache = TRUE}
+ntrees_seq = round(geom_seq(250, 1500, 5))
+shrinkage_seq = geom_seq(1e-3, 0.9, 5)
+z = matrix(0, length(ntrees_seq), length(shrinkage_seq))
+
+ntrees_ix = 1
+for (ntrees in ntrees_seq) {
+  shrinkage_ix = 1
+  for (shrinkage in shrinkage_seq) {
+    z[ntrees_ix, shrinkage_ix] = gbm_err(ntrees, shrinkage)
+    shrinkage_ix = shrinkage_ix + 1
+  }
+  ntrees_ix = ntrees_ix + 1
+}
+
+x = outer(ntrees_seq, shrinkage_seq, function(x, y) x)
+y = outer(ntrees_seq, shrinkage_seq, function(x, y) y)
+
+fig <- plot_ly(x = x, y = y, z = z, type = "mesh3d") %>% add_surface()
+scene <- list(yaxis=list(type = "log"))
+fig <- fig %>% layout(scene = scene)
+fig
+```
+
+A "perfect" prediction is reached for `ntrees` of $612$ and `shrinkage` of $0.03$, though, again, I would stress not to put much significance into the result. I would, however, like to put attention to the fact that changing `ntrees` here didn't really affect the result that much (or rather not as much as I would have thought it would), but for `shrinkage` there seems to be an optimal level around $0.03$; the entire surface looks somewhat like a saddle. 
+
+## Task 6
+
+First, we must use `rpart` for classification, and also render the tree.
+``` {r}
+tree = rpart(y ~ ., data = train_df, method = 'class')
+rpart.plot(tree, main = "Cancer type classification")
+```
+
+Which predictors were used is plainly visible; insofar as "comparing their means and variances between classes", I'm not necessarily sure what it's supposed to denote, wherefore I shall skip it.
+
+To check at which point to prune it, we look at complexity parameter table:
+``` {r}
+tree$cptable
+```
+
+Thus anything in the range of $(0.175, 0.3)$ should work.
+``` {r}
+pruned = prune(tree, cp = 0.2)
+rpart.plot(pruned, main = "Pruned tree")
+```
+
+Next three subtasks are about random forest; pretty similar to the stuff above. In fact, we shall reuse the machinery from above, though with some changes:
+```  {r}
+rf6_cv_err = function(mtry) {
+  k = 5
+  folds_indices = sample(cut(1:nrow(x), k, labels = F))
+
+  fold_error = function(fold_idx) {
+    test_indices = which(folds_indices == fold_idx)
+    fold_train = train_df[-test_indices,]
+    fold_test = train_df[test_indices,]
+
+    model = randomForest(
+      y ~ ., data = fold_train, importance = TRUE,
+      mtry = mtry, ntree = 500)
+    preds = predict(model, fold_test)
+
+    err = sum(preds != fold_test$y) / nrow(fold_test)
+    return(err)
+  }
+
+  return(mean(sapply(1:k, fold_error)))
+}
+```
+
+As for the training:
+``` {r, cache = TRUE}
+ntree_dist = round(geom_seq(50, 1000, 10))
+ntree_fit_errs = sapply(ntree_dist, rf6_cv_err)
+
+ggplot(data.frame("Ntree" = ntree_dist, "Error" = ntree_fit_errs)) +
+  geom_line(aes(x = Ntree, y = Error))
+```
+
+This is quite interesting, but, again, it's not quite as improbable given the fact that there are $20$ rows in the test set.
+
+Let's now look at the feature importance levels for various `mtry` values:
+
+``` {r, cache = TRUE}
+plot_rf6 = function(mtry, rf) {
+  imp = rf$importance
+  last = ncol(imp)
+  ord = order(imp[,last], decreasing = TRUE)
+  imp = imp[ord[1:16],]
+  df = data.frame(
+    "Importance" = as.numeric(imp[,last]),
+    "Feature" = rownames(imp))
+
+  plot = ggplot(df) +
+    geom_col(aes(x = reorder(Feature, -imp[,last]),
+                 y = Importance)) +
+    ggtitle(cat("Feature importance levels with mtry = ", mtry))
+  print(plot)
+}
+
+for (mtry in round(geom_seq(20, 2000, 8))) {
+  model = randomForest(
+    y ~ ., data = train_df, importance = TRUE,
+    mtry = mtry, ntree = 500)
+  plot_rf6(mtry, model)
+}
+```
+
+So, the top few features (`X1954`, `X2050`, `X545`, `X1003`, `X246` to name a few) are consistently near or at the top of the list. The order itself, however, changes with `mtry` increasing.
+
+There is a final point in the task, "Think of how one could do bagging with `randomForest`", and (it's pure conjecture) since random forests perform splits based on a random subset of features, and bagging models based on all features, if one were to increase used number of features for `randomForest`, it should be in effect a bagging model. I didn't check it though.

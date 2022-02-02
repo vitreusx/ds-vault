@@ -1,0 +1,383 @@
+---
+title: "Project #1"
+author: "Jakub Bednarz"
+output: html_notebook
+---
+
+``` {r}
+library(MASS)
+library(sur)
+library(GGally)
+require(reshape2)
+library(knitr)
+library(lmtest)
+```
+
+# 1. Intro
+First, let us load the data.
+
+``` {r}
+data <- read.table("people.tab", header = TRUE)
+knitr::kable(head(data))
+```
+
+Few initial things to check are (i) the number of records; (ii) whether there are any missing values.
+``` {r}
+cat("Num of records: ", dim(data)[1], "\n", sep = "")
+cat("Any missing values? ", any(is.na(data)), "\n", sep = "")
+```
+
+We'll need distinction between qualitative, quantitative, response and predictor variables.
+``` {r}
+qual <- c("gender", "married", "pet")
+quant <- c("age", "weight", "height", "number_of_kids", "expenses")
+resp <- c("expenses")
+pred <- setdiff(colnames(data), resp)
+```
+
+# 2. Graphs
+
+First, a scatter plot for quantitative variables:
+``` {r}
+ggpairs(data[quant], progress = FALSE)
+```
+
+Next, a box plot for a single quantitative variable:
+``` {r}
+chosen_quant <- sample(quant, 1)
+ggplot(data, aes_string(chosen_quant)) +
+    geom_boxplot()
+```
+
+and a bar plot for a single qualitative variable:
+``` {r}
+chosen_qual <- sample(qual, 1)
+ggplot(data, aes_string(chosen_qual)) +
+    geom_bar()
+```
+
+# 3. Hypothesis testing I
+
+## 3.1. $\mu$
+The first hypothesis is on the mean of height: $H_0$ is that the mean of height is $170$ cm, $H_1$ that it is less than that.
+
+This we can test using $t$-test. According to the lecture slides, this test assumes that the samples in question come from a normal distribution and are independent. In fact we can use a weaker assumption, i.e. that the estimator of $\mu$ is normally distributed, which follows asymptotically from CLT, and here, as $n = 500$, should indeed hold. Let's look at the graph:
+``` {r}
+ggplot(data, aes(x = height)) +
+    geom_histogram()
+```
+
+We can also check the normality assumption:
+```{r}
+noisy <- function(x) {
+    return(x + rnorm(length(x), sd = mean(x) * 1e-10))
+}
+
+normality_test <- function(x) {
+    print(shapiro.test(x))
+    n <- length(x)
+    x_mean <- mean(x)
+    x_sd <- sd(x)
+    print(ks.test(noisy(x), "pnorm", x_mean, x_sd))
+}
+
+normality_test(data$height)
+```
+
+So we have no reason to assume `height` is not normally distributed. At any rate, here's the test itself:
+``` {r}
+t.test(data$height, alternative = "less", mu = 170)
+```
+
+## 3.2. Median
+Let's spell out the hypotheses: $H_0$ is that they median of height is $165$ cm, $H_1$ that it is less than that.
+
+We can use Wilcoxon signed-ranks test for $X = {\tt height}$, $Y = 165 \text{ cm}$. The test assumes that the pairs come from the same population, are sampled independently and randomly, and that the data is on the interval scale [(Wikipedia)](https://en.wikipedia.org/wiki/Wilcoxon_signed-rank_test); these are of course fine to assume. Thus:
+``` {r}
+wilcox.test(data$height, alternative = "less", mu = 165)
+cat("med(height) = ", median(data$height), "\n", sep = "")
+```
+
+We aren't given any confidence levels, but clearly in the first case $H_0$ should be rejected in favor of $H_1$, whereas in the second case it shouldn't. Note that it doesn't mean that the median is 165 cm, only that it being less than that is even less acceptable.
+
+# 4. CI
+We are to give CIs at specificity level $\gamma = 0.99$ for `age`. 
+``` {r}
+gamma <- 0.99
+alpha <- 1.0 - gamma
+```
+
+Let's first look at this variable:
+``` {r}
+ggplot(data, aes(x = age)) +
+    geom_histogram()
+```
+
+This is quite an unusual age distribution. In fact, it looks somewhat like a normal distribution, even though in real life this doesn't hold. "Numerically":
+``` {r}
+normality_test(data$age)
+```
+
+So neither Shapiro-Wilk nor Kolmogorov-Smirnov does confirm our fears. This makes further work slightly difficult.
+
+Note: henceforth `age` shall be refered to as $X$.
+
+## 4.1. $\mu$
+For the mean, CLT suffices to derive reasonable CI even for a non-normal $X$. Indeed, we may assume $(\bar{X} - \mu)/(S/\sqrt{n}) \sim t(n-1)$, from which the intervals are:
+
+$$\left(X + \frac{q(\alpha/2)}{\sqrt{n}}S, X + \frac{q(1-\alpha/2)}{\sqrt{n}}S\right)$$
+
+``` {r}
+age_mean <- mean(data$age)
+age_sd <- sd(data$age)
+n <- length(data$age)
+df <- n - 1
+mu_low <- age_mean + qt(alpha / 2, df) / sqrt(n) * age_sd
+mu_high <- age_mean + qt(1 - alpha / 2, df) / sqrt(n) * age_sd
+cat(
+    "CI for mean = (",
+    mu_low, ", ", mu_high, ")", "\n",
+    sep = ""
+)
+```
+
+## 4.2. $\sigma$
+Here the matters become somewhat complicated, so let's assume that $X$ is close enough to a normal distribution that $nS^2/\sigma^2 \sim \chi^2(n-1)$ holds, so that we can get:
+
+$$\left(\sqrt{\frac{nS^2}{\chi^2(1-\alpha/2, n-1)}}, \sqrt{\frac{nS^2}{\chi^2(\alpha/2, n-1)}}\right)$$
+
+``` {r}
+sd_low <- sqrt(n * age_sd**2 / qchisq(1 - alpha / 2, df))
+sd_high <- sqrt(n * age_sd**2 / qchisq(alpha / 2, df))
+cat("CI for sd = (",
+    sd_low, ", ", sd_high, ")", "\n",
+    sep = ""
+)
+```
+
+## 4.3. Quantiles
+**Note:** (Essentially) taken from [Stack](https://stats.stackexchange.com/questions/99829/how-to-obtain-a-confidence-interval-for-a-percentile).
+
+Here I am not aware of any explicit formula for even the normal distribution. We must therefore resort to outright definitions. For a quantile $q$, assuming $X$ is distributed with a cdf $F$, $F^{-1}(q)$ is what we are after; in general for a sample $X_1, \ldots, X_n$, we expect each of $X_i$ to have a chance $q$ of being less than $F^{-1}(q)$, so the total number of such $X_i$'s should be distributed like Binom($n$, $q$). If we sort $X_i$ as $X_{(1)} \leq \ldots \leq X_{(n)}$, one reasonable option is to pick as the confidence interval $[X_{(l)}, X_{(u)}]$ as small as possible, for which $B(u; n, q) - B(l; n, q) \geq \gamma$ (Note: boundary errors may follow, I didn't really want to bother with index checking).
+
+``` {r}
+quantile_ci <- function(q) {
+    d <- round(sqrt(n))
+
+    l <- qbinom(alpha / 2, n, q) + (-d:d)
+    l[l <= 0] <- -Inf
+
+    u <- qbinom(1 - alpha / 2, n, q) + (-d:d)
+    u[u > n] <- Inf
+
+    sorted_age <- sort(data$age)
+
+    xls <- outer(l, u, function(xl, xu) xl)
+    xus <- outer(l, u, function(xl, xu) xu)
+
+    cover <- function(xl, xu) pbinom(xu, n, q) - pbinom(xl, n, q)
+    covers <- outer(l, u, cover)
+
+    span <- function(xl, xu) sorted_age[xu] - sorted_age[xl]
+    spans <- outer(l, u, span)
+
+    if (max(covers) < gamma) {
+        i <- which(spans == max(spans))[1]
+    }
+    else {
+        i <- which(spans == min(spans[covers >= gamma]))[1]
+    }
+
+    return(list(l = sorted_age[xls[i]], u = sorted_age[xus[i]]))
+}
+
+for (q in c(0.25, 0.5, 0.75)) {
+    q_ci <- quantile_ci(q)
+    cat("CI for quantile ", q, " = (", q_ci$l, ", ", q_ci$u, ")",
+        "\n",
+        sep = ""
+    )
+}
+```
+
+We can try to compare it to a heurestic: let's assume $X \sim \mathcal{N}(\hat{\mu}, S)$ so as to get:
+``` {r}
+quantile_ci_v2 <- function(q) {
+    ci_low_idx <- qbinom(alpha / 2, n, q)
+    ci_low <- qnorm(ci_low_idx / n, mean = age_mean, sd = age_sd)
+
+    ci_high_idx <- qbinom(1 - alpha / 2, n, q)
+    ci_high <- qnorm(ci_high_idx / n, mean = age_mean, sd = age_sd)
+
+    return(list(l = ci_low, u = ci_high))
+}
+
+for (q in c(0.25, 0.5, 0.75)) {
+    q_ci <- quantile_ci_v2(q)
+    cat("CI for quantile ", q, " = (", q_ci$l, ", ", q_ci$u, ")\n", sep = "")
+}
+```
+
+Indeed they are fairly similar.
+
+# 5. Hypothesis testing II
+
+``` {r}
+alpha <- 0.01
+gamma <- 1 - alpha
+```
+
+## 5.1. `height` difference for men and women.
+We will check whether $\mu({\tt height})$ is different for men and women. We chose this particular variable because (i) we have a clear intuition as to what sort of result we should get, (ii) we already checked that it's fair to assume that `height` is normally distributed, so we can use $t$-test. As for the formal hypotheses, $H_0$ is that the means are the same for men and women, $H_1$ that they are not.
+
+``` {r}
+men_height <- data$height[data$gender == "man"]
+women_height <- data$height[data$gender == "woman"]
+t.test(men_height, women_height, conf.level = gamma)
+```
+
+So, although there's clearly something here, we cannot (at $\alpha = 0.01$) reject the null hypothesis.
+
+## 5.2. (In)dependence of two quantitative variables.
+Let's pick `weight` and `age`. We will use Spearman's $\rho$. Let us note that we may have to introduce noise in order to prevent ties for the method to work. $H_0$ is that they are independent, $H_1$ that they are dependent.
+
+But first, a graph:
+``` {r}
+ggplot(data, aes(x = weight, y = age)) +
+    geom_point(shape = 21, size = 2, stroke = 1)
+```
+
+``` {r}
+cor.test(data$weight, data$age,
+    alternative = "two.sided",
+    conf.level = gamma,
+    method = "spearman"
+)
+```
+
+An easy method to fix the problem with ties is to introduce noise.
+``` {r}
+cor.test(noisy(data$weight), noisy(data$age),
+    alternative = "two.sided",
+    conf.level = gamma,
+    method = "spearman"
+)
+```
+
+There is therefore no reason to reject the null hypothesis (i.e. independence).
+
+## 5.3. (In)dependence of two qualitative variables
+Let's compare `gender` and `pet`. We shall use Pearson's $\chi^2$. Formal hypotheses are as before.
+
+Graph:
+``` {r}
+ggplot(data, aes(pet, ..count..)) +
+    geom_bar(aes(fill = gender), position = "dodge")
+```
+
+Test:
+``` {r}
+chisq.test(data$gender, data$pet)
+```
+
+Given the $p$ value, there is no reason to reject the null hypothesis.
+
+## 5.4. Equality of distributions
+We have already checked `height` and `age`, wherefore I shall skip further elaboration here.
+
+# 6. Linear model
+Looking at the correlation graphs in (2), I can't think of any meaningful feature augmentation to use. Thus, let's look at the model as it stands:
+
+``` {r}
+frm <- paste("expenses ~ ", paste(pred, collapse = " + "))
+model <- lm(frm, data)
+summary(model)
+```
+
+Let's now check what feature to remove:
+``` {r}
+full_r2 <- summary(model)$r.squared
+full_rss <- deviance(model)
+
+diff_r2 <- c()
+diff_rss <- c()
+pvalues <- summary(model)$coefficients[, 4]
+
+for (feat in pred) {
+    part_pred <- setdiff(pred, c(feat))
+    part_frm <- paste("expenses ~ ", paste(part_pred, collapse = " + "))
+    part_model <- lm(part_frm, data)
+
+    part_r2 <- summary(part_model)$r.squared
+    part_rss <- deviance(part_model)
+
+    diff_r2[feat] <- full_r2 - part_r2
+    diff_rss[feat] <- full_rss - part_rss
+}
+
+plotvs <- function(v) {
+    df <- data.frame(features = names(v), value = v)
+    print(v)
+    ggplot(df, aes(features, value)) +
+        geom_col() +
+        scale_y_log10()
+}
+
+plotvs(pvalues)
+plotvs(diff_r2)
+plotvs(-diff_rss)
+```
+
+So, seemingly, we should remove `married`. We shall now investigate the model assumptions.
+
+## Data nonlinearity
+
+``` {r}
+redux_pred <- setdiff(pred, c("married"))
+redux_frm <- paste("expenses ~ ", paste(redux_pred, collapse = " + "))
+redux_model <- lm(redux_frm, data)
+
+res <- resid(redux_model)
+predv <- predict(redux_model)
+
+fit <- loess(res ~ predv, degree = 1, span = 1 / 3)
+x1 <- seq(min(predv), max(predv), len = 500)
+fit_res <- predict(fit, data.frame(predv = x1))
+
+ggplot() +
+    geom_point(aes(x = predv, y = res)) +
+    geom_line(aes(x = x1, y = fit_res), color = "red") +
+    labs(x = "Fitted values", y = "Residuals")
+```
+
+## Non-constant variance of error terms
+Nothing really obvious comes to my mind when I look at the diagram above.
+
+## Outliers
+Here one should investigate the diagram with fitted values against Studentized residuals.
+
+``` {r}
+sr <- studres(redux_model)
+
+fit <- loess(sr ~ predv, degree = 1, span = 1 / 3)
+x1 <- seq(min(predv), max(predv), len = 500)
+fit_sr <- predict(fit, data.frame(predv = x1))
+
+ggplot() +
+    geom_point(aes(x = predv, y = sr)) +
+    geom_line(aes(x = x1, y = fit_sr), color = "red") +
+    labs(x = "Fitted values", y = "Studentized residuals")
+```
+
+I wouldn't say there's any obvious outlier, perhaps except for the far-right point.
+
+## High leverage points
+``` {r}
+lev <- leverage(redux_model)
+
+ggplot() +
+    geom_point(aes(x = lev, y = sr)) +
+    labs(x = "Leverage", y = "Studentized residuals")
+```
+
+So, inasfar as high leverage points and outliers are concerned, I wouldn't say it's all that significant; I cannot, however, argue that the assumptions of a linear model (i.e. that the underlying data is actually linear with some degree of feature-independent noise) hold for this particular dataset.

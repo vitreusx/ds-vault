@@ -1,0 +1,150 @@
+---
+author: "Author: <i>Jakub Bednarz</i>"
+title: "<center>Extra tasks from Lab 13</center>"
+output: html_notebook
+---
+
+``` {r}
+library(ggplot2)
+library(plotly)
+library(MASS)
+library(pls)
+library(leaps)
+
+set.seed(2112)
+
+knitr::opts_chunk$set(
+  warning = FALSE, 
+  message = FALSE
+)
+options(browser = 'chromium')
+```
+
+## Task 2
+We are to investigate the effects of noise on PCA, based on `iris` dataset.
+
+``` {r}
+noisy_pca = function(X, c, noise_n, noise_sd) {
+  n_obs = dim(X)[1]
+  noise = rnorm(noise_n * n_obs, 0, noise_sd)
+  dim(noise) = c(n_obs, noise_n)
+  pX = cbind(X, noise)
+
+  pca = prcomp(pX)
+  ggplot() +
+    geom_point(aes(x = pca$x[,1], y = pca$x[,2], color = c))
+}
+```
+
+First, `iris` without noise:
+``` {r}
+noisy_pca(iris[,1:4], iris[,5], 0, 1)
+```
+
+Then, `iris` with 100 columns worth of $\mathcal{N}(0, 1)$ noise:
+``` {r}
+noisy_pca(iris[,1:4], iris[,5], 100, 1)
+```
+
+We can see that the noisy columns have made the separation between the different types far less clear.
+
+Next, `iris` with 100 columns $\mathcal{N}(0, 0.1^2)$ noise:
+``` {r}
+noisy_pca(iris[,1:4], iris[,5], 100, 0.1)
+```
+
+and with $\sigma = \mathcal{N}(0, 4^2)$ noise:
+``` {r}
+noisy_pca(iris[,1:4], iris[,5], 100, 4)
+```
+
+For $\sigma = 0.1$ the change is fairly small, whereas for $\sigma = 4$ the change is significant. Let's look at the variances of the original columns:
+``` {r}
+apply(iris[,1:4], 2, var)
+```
+
+We can see that adding "features" with $\sigma = 4$ would necessarily distort PCA since it projects onto the "directions with largest variance".
+
+## Task 3
+In this task we investigate the effect of the outliers on PCA.
+
+First, we want to plot a sample from $(4X, 2Y, Z)$ where $X, Y, Z \sim \mathcal{N}(0, 1)$ (presumably it's just an cuboid-shaped point cloud):
+``` {r}
+n = 100
+p = rnorm(3 * n)
+dim(p) = c(n, 3)
+
+p_df = as.data.frame(p)
+colnames(p_df) = c("X", "Y", "Z")
+
+p_df[,"X"] = 4 * p_df[,"X"]
+p_df[,"Y"] = 2 * p_df[,"Y"]
+
+fig = plot_ly(p_df, x = ~X, y = ~Y, z = ~Z)
+fig = fig %>% add_markers()
+fig = fig %>% layout(
+  scene=list(
+    yaxis = list(scaleanchor="x"),
+    zaxis = list(scaleanchor="x")
+  )
+)
+fig
+```
+
+Let's look at the directions:
+``` {r}
+prcomp(p_df)$rotation
+```
+
+Nothing particularly interesting. And now let's look at the same when we substitute the last observation to $(40, 40, 40)$.
+``` {r}
+p_df[dim(p_df)[1],] = c(40, 40, 40)
+prcomp(p_df)$rotation
+```
+
+We can see that the first direction really shifted towards pointing to $(1, 1, 1)$.
+
+## Task 4
+``` {r}
+biopsy[,"ID"] = NULL
+biopsy[,"class"] = NULL
+biopsy = biopsy[complete.cases(biopsy),]
+model = pcr(V2 ~ ., data = biopsy, validation = "CV")
+```
+
+Let's look at the summary:
+``` {r}
+summary(model)
+```
+
+So, 3 principal components explain $\geq 80\%$ of data's variance, and only 2 explain $\geq 80\%$ of `V2`'s variance.
+
+Let's look at which variables contribute the most to the first principal component:
+``` {r}
+pca1 = model$loadings[,1]
+pca1_ord = order(pca1)
+pca1_df = pca1[pca1_ord]
+colnames(pca1_df) = colnames(pca1)[pca1_ord]
+pca1_df
+```
+
+Regarding the coefficients, from what I understand this should be sufficient:
+``` {r}
+model$Yloadings
+```
+
+So with one PC we'd have $\beta = -0.423$, and with two $\beta = [-0.423, 0.182]^T$.
+
+Now we shall check what number of PCs will minimize the error (here MSE) [Apologies for the horrendous plot but I couldn't be bothered to figure out how to do it in `ggplot2`]:
+``` {r}
+validationplot(model, val.type = "MSEP")
+```
+
+Finally, we shall investigate whether the predictors most impactful on `PC1` are the same as the ones selected by `regsubsets`:
+``` {r}
+rs = regsubsets(V2 ~ ., data = biopsy, nvmax = 8)
+x = summary(rs)
+x$which
+```
+
+We can see that the selected variables are in the order of `V3`, `V5`, `V7`, `V4`, `V1`, `V6`, `V9`. So (unless I did the procedure incorrectly) it's not at all what the PCA would tell us.
